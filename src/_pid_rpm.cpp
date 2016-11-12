@@ -1,7 +1,12 @@
 /*
     ALAN HONG
-    POWERBOARD PCB CONTROL CODE
-    This is the main project file.
+    TEST SCRIPT FOR DIY TACHOMETER
+
+    Hardware description:
+    Attach strip of tape to motor such that the tape has a tab extending out.
+    Arrange LED and photodiode such that they face each other with a small gap between.
+    The tab of tape will pass between the LED and photodiode such that it obstructs the light periodically.
+    Reverse bias the photodiode with 5V
 */
 
 //LIBRARIES
@@ -45,36 +50,32 @@ void int_fired3();
 #define __ESC_PER 18   //ESC signal PWM period (in ms)
 #define __INT_RPM1 18   //Interrupt pin for RPM sensor 1
 #define __INT_RPM2 19   //Interrupt pin for RPM sensor 2
-#define __INT_TACH 20
+#define __INT_ENCOD 20   //Interrupt pin for photodiode of tachometer
 
 #define __CURRENT_LIM 10
+
+#define __AVG_ITERATIONS 50
 
 // Global Variables
 int adc_val = 0;
 float curr_val = 0.0;
 float curr_avg = 0.0;   //Moving average
 int pot_val = 0;   //Value maps 0-3.3V to 0-1023 value
-int pot_avg = 0;   //Moving average
-int pot_max = 0;   //Last acceptable pot_val within current limit
-int loop_counter = 0;
+int pot_max = 0;
+int loop_counter1 = 0;
+int loop_counter2 = 0;
+
 int interrupt_count1 = 0;
-bool interrupt_called1 = false;
 int interrupt_count2 = 0;
-bool interrupt_called2 = false;
-
 int interrupt_count3 = 0; //photodiode interrupt counter
-bool interrupt_called3 = false;
-
-
-
-unsigned long time_prev1 = 0;
-unsigned long time_prev2 = 0;
-unsigned long time_prev3 = 0;
+unsigned long time_prev = 0;
 unsigned long time_curr = 0;
 unsigned long time_diff = 0;
 float rpm1 = 0.;
 float rpm2 = 0.;
-float tach = 0.;
+float encod = 0.;
+
+bool flag_start = false;
 
 String str;
 
@@ -92,13 +93,11 @@ void setup() {
   tft.setTextSize(2);
   // tft.print("Hello World!");
 
-  Serial.println(F("TACHOMETER SCRIPT EXECUTE!"));
+  Serial.println(F("Begin measurement!"));
 
-  lcd_write("RPM:",1);
-  lcd_write("TACH:",3);
-  lcd_write("Pot_max:",5);
-
-  Serial.println(F("...soon."));
+  lcd_write("Meas #:",1);
+  lcd_write("Current:",3);
+  lcd_write("ESC val:",5);
 
 
   //initialize ESC PWM. 20ms period: 50hz. Logic min: 0.5ms; 1/40 duty. Logic max: 2.5ms; 1/8 duty.
@@ -121,90 +120,104 @@ void setup() {
   Timer3.pwm(__ESC_SIG,114);  //duty cycle specified from 0-1023
 
   //initialize RPM Sensor interrupt pin
+  noInterrupts();
   pinMode(__INT_RPM1, INPUT);
-  attachInterrupt(digitalPinToInterrupt(__INT_RPM1), int_fired1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(__INT_RPM1), int_fired1, RISING);
   pinMode(__INT_RPM2, INPUT);
-  attachInterrupt(digitalPinToInterrupt(__INT_RPM2), int_fired2, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(__INT_RPM2), int_fired2, RISING);
+  pinMode(__INT_ENCOD, INPUT);
+  attachInterrupt(digitalPinToInterrupt(__INT_ENCOD), int_fired3, RISING);
+  interrupts();
 
-  pinMode(__INT_TACH, INPUT);
-  attachInterrupt(digitalPinToInterrupt(__INT_TACH), int_fired3, RISING);
-
-  time_prev1 = time_prev2 = time_prev3 = micros();
-
+  pot_max = 50;
+  lcd_write(String(pot_max),6);
+  esc_val(pot_max); // set PPM/PWM signal
 }
 
 
 
 // ARDUINO MAIN LOOP FUNCTION
 void loop(void) {
-  //READ RPM SENSOR
-  if (interrupt_called1) {
-    time_curr = micros();
-    time_diff = time_curr-time_prev1;
-    rpm1 = ((float)interrupt_count1 * 1000000.0 / (float)time_diff) * 60.0 / 7.0; //RPM = (interrupts per sec) *60 / (# of poles in motor / 2). Each Torqueboards motor has ...14 poles? AH_NOTE: verify # of poles
-
-    interrupt_called1 = false;
-    interrupt_count1 = 0;
-    time_prev1 = time_curr;  // store current time for next iteration
-  }
-
-  if (interrupt_called2) {
-    time_curr = micros();
-    time_diff = time_curr-time_prev2;
-    rpm2 = ((float)interrupt_count2 * 1000000.0 / (float)time_diff) * 60.0 / 7.0; //RPM = (interrupts per sec) *60 / (# of poles in motor / 2). Each Torqueboards motor has ...14 poles? AH_NOTE: verify # of poles
-
-    interrupt_called2 = false;
-    interrupt_count2 = 0;
-    time_prev2 = time_curr;  // store current time for next iteration
-  }
-
-  if (interrupt_called3) {
-    time_curr = micros();
-    time_diff = time_curr-time_prev3;
-    tach = ((float)interrupt_count3 * 1000000.0 / (float)time_diff) * 60.0; //RPM = (# interrupts per sec) *(60 sec per min) / (# of poles in motor / 2). Each Torqueboards motor has ...14 poles? AH_NOTE: verify # of poles
-
-    interrupt_called3 = false;
-    interrupt_count3 = 0;
-    time_prev3 = time_curr;  // store current time for next iteration
-  }
 
   //READ JOYSTICK POTENTIOMETER
   adc_val = analogRead(A1); //0-1023 maps to 0-5V. Therefore, 0-675 maps to 0-3.3V
   pot_val = 100-(signed int)((adc_val*100.0)/675.0);
-  if (pot_val < 50){
-    pot_val = (150-pot_val)/2;
-  }
-  pot_avg = (pot_avg + 4*pot_val)/5; //Filter using moving average
 
-   //READ CURRENT SENSOR
+  //READ CURRENT SENSOR
   adc_val = analogRead(A2);
   // curr_val = (adc_val-100)/8.0 //FOR UNIDIRECTIONAL SENSOR.
   curr_val = (adc_val-510)/4.0; //adjusted 510 to 511 for PCB offset
   curr_avg = (curr_avg + curr_val*3)/4; //Filter using moving average
 
-  //Safety conditions: reverse current, overcurrent
-  if (curr_avg < -0.5){
-      pot_avg = (int)((float)pot_avg-0.9*(float)(pot_avg-50)); //drag written value down to
-      pot_max = pot_avg;
-  } else if (curr_avg <= __CURRENT_LIM){
-      pot_max = (pot_avg+4*pot_max)/5;
-  } else{
-      if (pot_max>50){
-          pot_max = pot_max - 1;
+  //TERMINATING CONDITIONS
+  // if ((curr_avg > __CURRENT_LIM) || (pot_max > 80)){
+  //     Serial.println("Halting test.");
+  //     Serial.println(String( String(curr_val) + " " + String(curr_avg)));
+  //     pot_max = 50;
+  //     esc_val(pot_max);
+  //     lcd_write(String(pot_max),6);
+  //     loop_counter1 = 0;
+  //     loop_counter2 = 0;
+  //     flag_start = false;
+  //     delay (1000);
+  // }
+
+
+  if ((flag_start == false) && (pot_val > 60)){
+    flag_start = true;
+    time_prev = micros();
+    interrupt_count1 = interrupt_count2 = interrupt_count3 = 0;
+  }
+
+  //EXECUTE LOGGING
+  if (flag_start){
+
+    loop_counter1++;
+
+    if (loop_counter1 >=100){
+      //READ RPM SENSOR
+      time_curr = micros();
+      time_diff = time_curr-time_prev;
+
+      noInterrupts();
+      rpm1 += ((float)interrupt_count1 * 1000000.0 / (float)time_diff) * 60.0 / 7.0; //RPM = (interrupts per sec) *60 / (# of poles in motor / 2). Each Torqueboards motor has ...14 poles? AH_NOTE: verify # of poles
+      rpm2 += ((float)interrupt_count2 * 1000000.0 / (float)time_diff) * 60.0 / 7.0; //RPM = (interrupts per sec) *60 / (# of poles in motor / 2). Each Torqueboards motor has ...14 poles? AH_NOTE: verify # of poles
+      encod += ((float)interrupt_count3 * 1000000.0 / (float)time_diff) * 60.0 / 99.0; //RPM = (# interrupts per sec) *(60 sec per min) / (# of poles in motor / 2). Each Torqueboards motor has ...14 poles? AH_NOTE: verify # of poles
+      interrupt_count1 = interrupt_count2 = interrupt_count3 = 0;
+      interrupts();
+
+      time_prev = micros();  // store current time for next iteration
+
+      loop_counter1 = 0;
+      loop_counter2++;
+
+      //DISPLAY VALUES ON LCD SCREEN
+      lcd_write(String(loop_counter2),2);
+      lcd_write(String(curr_avg), 4);
+    }
+
+    if (loop_counter2 >= __AVG_ITERATIONS){
+      rpm1 /= __AVG_ITERATIONS;
+      rpm2 /= __AVG_ITERATIONS;
+      encod /= __AVG_ITERATIONS;
+      Serial.println(String( String(pot_max)+ " " + String(rpm1) + " " + String(rpm2) + " " + String(encod) ));
+
+      rpm1 = rpm2 = encod = 0;
+      loop_counter2 = 0;
+
+      pot_max +=5;
+      if (pot_max <=80){
+        lcd_write(String(pot_max),6);
+        esc_val(pot_max);
+        delay(2000);
+        interrupt_count1 = interrupt_count2 = interrupt_count3 = 0;
+
+        time_prev = micros();  // store current time for next iteration
       }
+    }
+
   }
 
-  esc_val(pot_max); // set PPM/PWM signal
-
-  //DISPLAY VALUES ON LCD SCREEN
-  loop_counter++;
-  if (loop_counter >=1250){
-    lcd_write(String(rpm1),2);
-    lcd_write(String(tach), 4);
-    lcd_write(String(pot_max),6);
-    loop_counter = 0;
-    Serial.println(String("RPM: " + String(rpm1) + " | TACH: " + String(tach)) );
-  }
 }
 
 
@@ -242,23 +255,12 @@ void esc_val(int throttle){
 void int_fired1()
 {
     interrupt_count1++;
-    if (interrupt_called1 == false){
-      interrupt_called1 = true;
-    }
 }
 void int_fired2()
 {
     interrupt_count2++;
-    if (interrupt_called2 == false){
-      interrupt_called2 = true;
-    }
 }
-
-
 void int_fired3()
 {
     interrupt_count3++;
-    if (interrupt_called3 == false){
-      interrupt_called3 = true;
-    }
 }
