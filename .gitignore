@@ -3,6 +3,7 @@
 .gcc-flags.json
 .piolibdeps
 *.ini
+*.yml
 
 lib/Filters/
 lib/NewPing/
