@@ -4,7 +4,8 @@
 .piolibdeps
 
 lib/
+
+!lib/TFT_ST7735/
 !lib/Adafruit_BNO055/
 !lib/Timer3/
 !lib/ros_lib/
-!lib/TFT_ST7735/
