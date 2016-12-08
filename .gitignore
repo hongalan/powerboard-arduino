@@ -3,7 +3,10 @@
 .gcc-flags.json
 .piolibdeps
 
-lib/
+lib/Filters/
+lib/NewPing/
+lib/SharpIR/
+lib/Adafruit_Sensor/
 
 !lib/TFT_ST7735/
 !lib/Adafruit_BNO055/
